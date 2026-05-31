@@ -27,6 +27,12 @@ SGLANG_ROUTER_PORT="${SGLANG_ROUTER_PORT:-19000}"
 SGLANG_ROUTER_HOST="${SGLANG_ROUTER_HOST:-$(python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(("8.8.8.8",80)); print(s.getsockname()[0]); s.close()')}"
 SGLANG_ROUTER_BASE_URL="http://${SGLANG_ROUTER_HOST}:${SGLANG_ROUTER_PORT}"
 
+# Harness override. The minimal SGLang token-id patch (patch_sglang_min.sh)
+# only patches the NON-streaming response path, so for trainable token_ids the
+# agent must speak non-streaming. `pi` (require_streaming=false) is bundled in
+# our agent-CLI dir; the default qwen_code is streaming and yields zero
+# trainable tokens with the minimal patch.
+HARNESS="${HARNESS:-pi}"
 AGENT_CLI_DIR="${AGENT_CLI_DIR:-${PROJECT_ROOT}/tmp/swegym_agent_cli/opt_node}"
 APPTAINER_IMAGE_DIR="${APPTAINER_IMAGE_DIR:-${PROJECT_ROOT}/tmp/swegym_apptainer_images}"
 export POLAR_APPTAINER_BIN="${POLAR_APPTAINER_BIN:-/usr/bin/apptainer}"
@@ -40,13 +46,13 @@ CUSTOM_CONFIG_PATH="${RUN_DIR}/polar_config.yaml"
   "${SCRIPT_DIR}/topology.yaml" "${TOPOLOGY_PATH}" "${SGLANG_ROUTER_BASE_URL}" \
   "${SCRIPT_DIR}/polar_config.yaml" "${CUSTOM_CONFIG_PATH}" \
   "${AGENT_CLI_DIR}" "${APPTAINER_IMAGE_DIR}" \
-  "${ROLLOUT_PORT}" "${GATEWAY_PORT}" <<'PY'
+  "${ROLLOUT_PORT}" "${GATEWAY_PORT}" "${HARNESS}" <<'PY'
 from pathlib import Path
 import sys
 import yaml
 
 (topo_in, topo_out, router_url, polar_in, polar_out,
- agent_cli_dir, image_dir, rollout_port, gateway_port) = sys.argv[1:]
+ agent_cli_dir, image_dir, rollout_port, gateway_port, harness) = sys.argv[1:]
 rollout_port, gateway_port = int(rollout_port), int(gateway_port)
 
 topo = yaml.safe_load(open(topo_in)) or {}
@@ -66,6 +72,7 @@ pc["polar_rollout_url"] = f"http://127.0.0.1:{rollout_port}"
 pc["polar_gateway_url"] = f"http://127.0.0.1:{gateway_port}"
 pc["polar_agent_cli_dir"] = agent_cli_dir
 pc["polar_apptainer_image_dir"] = image_dir
+pc.setdefault("polar_task_template", {}).setdefault("agent", {})["harness"] = harness
 yaml.safe_dump(pc, open(polar_out, "w"), sort_keys=False)
 print(f"rendered {topo_out} (rollout :{rollout_port}, gateway :{gateway_port}, sglang {router_url})")
 print(f"rendered {polar_out}")

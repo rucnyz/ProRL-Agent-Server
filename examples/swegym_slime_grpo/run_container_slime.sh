@@ -72,6 +72,17 @@ RUNTIME_ENV_JSON="{
   }
 }"
 
+# Apply the SGLang token-id emission patch (idempotent). Without it the
+# gateway-recorded trajectories carry no token_ids and slime_bridge drops
+# every trace as "zero trainable tokens". patch_sglang_min.sh patches only the
+# non-streaming response path → pair with a non-streaming harness (pi).
+PATCH_SGLANG="${PATCH_SGLANG:-1}"
+if [ "${PATCH_SGLANG}" = "1" ]; then
+    echo "=== Applying SGLang token-id patch (patch_sglang_min.sh) ==="
+    bash "${PROJECT_ROOT}/scripts/patch/patch_sglang_min.sh" || {
+        echo "WARN: patch_sglang_min.sh did not apply cleanly; continuing" >&2; }
+fi
+
 echo "=== Starting Ray (${RAY_NUM_GPUS} GPUs) ==="
 ray stop --force 2>/dev/null || true
 sleep 1
