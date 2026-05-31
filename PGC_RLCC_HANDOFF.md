@@ -7,8 +7,8 @@
 ## 0. 一句话现状
 
 - ✅ **Polar 端到端 rollout smoke test 在 B300 上跑通**（reward 1.0，calculator example, claude_code harness, SGLang docker image）。
-- 🚧 **Slime 训练循环在 B300 + cu130 bare-metal pip 装行不通**（numpy/scipy/transformers 与 Slime 强制 numpy<2 死锁）。
-- 🚧 **正在尝试**用 Slime 官方 docker 构建 `ENABLE_CUDA_13=1` 镜像（专为 GB300 设计）来绕过 bare-metal 死锁。
+- ✅ **Slime cu130 docker image build 完成** (`slimerl/slime-cu130:local`, 73GB)，全栈在 B300 上可 import（torch 2.11 cu129 + sgl_kernel 0.4.2.post2+cu130 + Slime + Megatron + TransformerEngine + patched Triton）。需要 `LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:...`。
+- 🚧 **下一步：进容器跑 swegym_slime_grpo example 端到端训练（convert weights + run.sh）**。
 
 ## 1. 工作目录与仓库
 
@@ -173,10 +173,19 @@ RUN if [ "${ENABLE_CUDA_13}" = "1" ]; then \
 
 ### Docker build 命令
 
+**用我们的封装脚本**（应用了下面列出的 4 个 patch，保证 B300 build 一次过）：
+
 ```bash
-cd /scratch/yuzhou/projects/ProRL-Agent-Server/slime
+bash docker/slime-cu130/build.sh
+```
+
+或手动：
+```bash
+cp docker/slime-cu130/Dockerfile slime/docker/Dockerfile
+cd slime
 docker build \
   --build-arg ENABLE_CUDA_13=1 \
+  --build-arg ENABLE_SGLANG_PATCH=0 \
   --build-arg SGLANG_IMAGE_TAG=v0.5.12.post1-cu129 \
   --build-arg MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862 \
   --build-arg PATCH_VERSION=latest \
@@ -184,10 +193,30 @@ docker build \
   -f docker/Dockerfile .
 ```
 
-**注意：**
-- `SGLANG_IMAGE_TAG` 用最新的 cu129 base（slimerl 没发 cu130 base，但 ENABLE_CUDA_13=1 会在 build 时 overlay cu130 sgl-kernel）。
-- 预计 build 时间 **30-60min**（要 compile：flash-attn 2.7.4 + hopper FA + TransformerEngine + Apex + 可能 patched Triton）。
-- 占用磁盘 60-80GB。我们这台 / 还有 300GB，OK。
+### 我们对上游 Slime Dockerfile 做的 4 处修改（理由）
+
+1. **`nvidia-mathdx==26.6.0` → `pybind11 nvidia-mathdx==25.6.0`**：上游 26.6.0 不在公开 pypi（最新公开 25.6.0）；同时 TE source build 需要 pybind11 但 base image 没装。
+2. **`pip install -r /tmp/requirements.txt` → `apt-get remove -y python3-jwt; pip install --ignore-installed PyJWT; pip install -r /tmp/requirements.txt`**：base image 用 apt 装的 python3-jwt 2.7.0 没 RECORD 文件，pip 在装 ray[default] 的依赖时无法卸载。
+3. **`sgl_kernel-0.3.17.post2+cu130` → `sglang_kernel-0.4.2.post2+cu130 + uninstall sgl-kernel`**：旧 sgl_kernel build against torch 2.9 ABI（symbol `c10_cuda_check_implementation(int, ...)`），但 image 自带 torch 2.11 ABI 是 `(unsigned int, ...)`，import 时 undefined symbol。新版 `sglang-kernel`（注意改名）的 cu130 wheel 是新 ABI，且 uninstall sgl-kernel 防止旧 abi3.so 被加载。
+4. **`ENABLE_SGLANG_PATCH=0` 默认**（命令行传入，Dockerfile 上游有 `# TODO temporarily skip patching for GB200/GB300` 注释）：Slime 自带的 sglang.patch 与 sglang 0.5.12.post1 已经不兼容。
+
+### 镜像启动 + 全栈 sanity 测试
+
+```bash
+docker run --rm --gpus '"device=0"' \
+  -e LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/lib:/usr/local/cuda/lib64 \
+  slimerl/slime-cu130:local \
+  python3 -c "
+import torch, sglang, sgl_kernel, slime, megatron, transformer_engine.pytorch
+print(torch.__version__, torch.cuda.is_available())
+p = torch.cuda.get_device_properties(0)
+print(f'{p.name} sm_{p.major}{p.minor}')
+"
+```
+
+预期：`2.11.0+cu129 True` + `NVIDIA B300 SXM6 AC sm_103`。
+
+**LD_LIBRARY_PATH 必须**——`sgl_kernel` 需要 `libnvrtc.so.13`（cu130 runtime），但 base image 默认 cu12 路径优先。
 
 ### Build 完后跑训练
 
