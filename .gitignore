@@ -120,3 +120,10 @@ docs/_build/
 # Dashboard frontend build artifacts
 web/node_modules/
 web/dist/
+
+# Local dev artifacts (added in pgc-rlcc fork)
+.local-npm/
+.venv/
+.runtime-logs/
+rollout_results/
+examples/calculator/batches/
