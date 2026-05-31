@@ -127,3 +127,4 @@ web/dist/
 .runtime-logs/
 rollout_results/
 examples/calculator/batches/
+.venv-host/

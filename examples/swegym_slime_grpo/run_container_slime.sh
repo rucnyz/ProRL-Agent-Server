@@ -60,8 +60,20 @@ MODEL_ARGS=(
 CUDNN_LIB="/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib"
 CU13_LIB="/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib"
 NVRTC12_LIB="/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/lib"
+# Job-level LD path carries cu13 (libcudart.so.13 / libnvrtc.so.13) for the SGLang
+# rollout engine: sgl_kernel cu130 needs it on B300 (sm_103). The SGLang engine
+# actor sets no LD_LIBRARY_PATH of its own (rollout.py), so it inherits this.
 RUNTIME_LD="${CU13_LIB}:${NVRTC12_LIB}:${CUDNN_LIB}:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
-
+# The Megatron train actor is a pure-cu12 stack (torch 2.11+cu129, TE built against
+# CUDA 12.9). It imports sglang only for weight-sync helpers (MultiprocessingSerializer
+# / FlattenedTensorBucket) — which do NOT load sgl_kernel — so it must NOT have cu13
+# on its path. With cu13 present, libcudart.so.13 gets loaded alongside torch's
+# libcudart.so.12 and TE aborts fused_attn with "Multiple libcudart libraries found"
+# (the scan rejects two cudarts; NVTE_DISABLE_NVRTC / NVTE_CUDA_INCLUDE_DIR do NOT
+# bypass it — verified). The train actor therefore gets a cu13-free LD_LIBRARY_PATH
+# via slime's --train-env-vars below (Ray merges actor env over job env and REPLACES
+# LD_LIBRARY_PATH rather than prepending — verified on Ray 2.55).
+TRAIN_LD="${NVRTC12_LIB}:${CUDNN_LIB}:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"${MEGATRON_DIR}:${PROJECT_ROOT}/src\",
@@ -71,6 +83,8 @@ RUNTIME_ENV_JSON="{
     \"PYTORCH_CUDA_ALLOC_CONF\": \"max_split_size_mb:2048,expandable_segments:True\"
   }
 }"
+# cu13-free LD override for the train actor only (see TRAIN_LD comment above).
+TRAIN_ENV_VARS_JSON="{\"LD_LIBRARY_PATH\": \"${TRAIN_LD}\"}"
 
 # Apply the SGLang token-id emission patch (idempotent). Without it the
 # gateway-recorded trajectories carry no token_ids and slime_bridge drops
@@ -84,6 +98,18 @@ if [ "${PATCH_SGLANG}" = "1" ]; then
         echo "WARN: patch_sglang_min.sh did not apply cleanly; continuing" >&2; }
 fi
 
+# Un-gate TE flash-attention for head_dim=256 on B300 (sm103). Without this the
+# Qwen3.5 (kv_channels=256) attention has NO available backend under the THD
+# packing slime uses, and train() dies with "No dot product attention backend is
+# available". See scripts/patch/patch_te_sm103.sh.
+PATCH_TE_SM103="${PATCH_TE_SM103:-1}"
+if [ "${PATCH_TE_SM103}" = "1" ]; then
+    echo "=== Applying TE sm103 flash-attn patch (patch_te_sm103.sh) ==="
+    PATCH_PYTHON="${PATCH_PYTHON:-python3}" \
+    bash "${PROJECT_ROOT}/scripts/patch/patch_te_sm103.sh" || {
+        echo "WARN: patch_te_sm103.sh did not apply cleanly; continuing" >&2; }
+fi
+
 echo "=== Starting Ray (${RAY_NUM_GPUS} GPUs) ==="
 ray stop --force 2>/dev/null || true
 sleep 1
@@ -93,6 +119,7 @@ echo "=== Launching train_async.py (split mode; Polar on host) ==="
 ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
     --runtime-env-json="${RUNTIME_ENV_JSON}" \
     -- python3 "${SLIME_DIR}/train_async.py" \
+    --train-env-vars "${TRAIN_ENV_VARS_JSON}" \
     --actor-num-nodes 1 \
     --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}" \
     --rollout-num-gpus "${ROLLOUT_NUM_GPUS}" \

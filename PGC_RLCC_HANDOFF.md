@@ -11,7 +11,12 @@
 - ✅ **权重转换成功**（Qwen3.5-4B HF → Megatron torch_dist, 7.9G, 在容器内一次过）。
 - ✅ **Slime+Polar 端到端训练管线在 B300 上跑起来了**（拆分编排：host 跑 Polar+apptainer，容器跑 Ray+Slime+SGLang，`--network host` 互通）。已验证：SGLang 2 引擎 ready、Megatron 加载、Polar gateway proxy、apptainer SWE-Gym sandbox 起来、agent 真的在解题（SGLang decode 300-500 tok/s、gateway `/v1/chat/completions` 200 OK）。
 - ✅ **token-id blocker 已解决**：精简非流式 patch (`scripts/patch/patch_sglang_min.sh`) + `pi` 非流式 harness → `zero trainable tokens` 不再出现（整 run 0 次）。rollout/reward/advantage 链路全通，Megatron 加载 ckpt、pi agent 在 SWE-Gym sandbox 解题、SGLang decode 正常。
-- 🚧 **当前 blocker：weight-sync NCCL hang**。首个 GRPO step 的 weight update（Megatron→SGLang，NCCL custom process group `world_size=3` = 1 train + 2 engines）卡死：只有 1 个 engine 调了 `init_weights_update_group`（应 2 个），第二个引擎从不加入 → NCCL broadcast 永久阻塞，GPU 0%。详见 §9。
+- ✅ **weight-sync NCCL hang 已解决**：`ROLLOUT_NUM_GPUS=1`（单引擎，`world_size=2`）→ weight update 2.0-2.2s 完成。2 引擎的 group fan-out 问题留待后面查。
+- ✅✅ **首个真实 GRPO 训练步跑通（端到端闭环）**：`pi` harness + Qwen3.5-4B + 3-instance smoke。`step 1: train/grad_norm=2.94, pg_loss=-0.58, kl_loss=3e-4, tis=0.9997, global_batch_size=8`，checkpoint 落盘，权重同步回 SGLang（0.6s），干净 `Exit 0`（1 epoch smoke 数据耗尽）。链路：agentic rollout → swegym 评测 reward → GRPO advantage → Megatron 训练步 → ckpt → weight-sync。
+- 🔧 **闭环路上修掉的两个 B300 专属坑**（都固化进脚本，见 §11）：
+  1. **libcudart 冲突**：train actor 为 weight-sync `import sglang` 时，若 cu13 在其 `LD_LIBRARY_PATH` 上会把 `libcudart.so.13` 拉进进程，与 torch 的 `.so.12` 冲突，TE fused_attn 报 `Multiple libcudart libraries found`。解法：用 slime 自带 `--train-env-vars '{"LD_LIBRARY_PATH": "<不含 cu13>"}'` 给 train actor 单独设 cu13-free LD（Ray 实测完全覆盖、不 prepend）；SGLang 引擎仍走 job 级含 cu13 的 LD（它需要 sgl_kernel cu130）。
+  2. **head_dim=256 无 attention 后端**：B300=sm103，TE 2.10 把 flash-attn head_dim>192 的白名单写死成 `(8,0)(9,0)(10,0)(12,0)`（漏了 sm103），cuDNN 9.16 fused 不支持 head_dim256，THD packing 又禁用 unfused → `No dot product attention backend is available`。解法：`scripts/patch/patch_te_sm103.sh` 给白名单加 `(10,3)`，flash-attn 2.7.4 的 kernel 实测能在 sm103+head_dim256+thd 上正确跑（sm103/B300 与 sm100/B200 同属 Blackwell，kernel 通用）。**注意：全 cu13 并不能解决这个 attention 问题（已验证），它和 cu12/cu13 正交。**
+- 🚧 **下一步**：切 `claude_code` harness（流式）。需把 token-id emission 的流式分支 port 进 sglang patch（`patch_sglang_min.sh` 目前只覆盖非流式，配 `pi`）。详见 §8 路 A。
 
 ## 1. 工作目录与仓库
 
