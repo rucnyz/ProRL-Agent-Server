@@ -79,6 +79,7 @@ RUNTIME_ENV_JSON="{
 PATCH_SGLANG="${PATCH_SGLANG:-1}"
 if [ "${PATCH_SGLANG}" = "1" ]; then
     echo "=== Applying SGLang token-id patch (patch_sglang_min.sh) ==="
+    PATCH_PYTHON="${PATCH_PYTHON:-python3}" \
     bash "${PROJECT_ROOT}/scripts/patch/patch_sglang_min.sh" || {
         echo "WARN: patch_sglang_min.sh did not apply cleanly; continuing" >&2; }
 fi

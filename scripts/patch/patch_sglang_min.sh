@@ -14,7 +14,11 @@ set -euo pipefail
 
 SERVER_URL="${1:-${SGLANG_SERVER_URL:-}}"
 
-if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+if [[ -n "${PATCH_PYTHON:-}" ]]; then
+  # Explicit interpreter override (e.g. inside the slime container where a host
+  # .venv without sglang may be bind-mounted into the cwd).
+  PYTHON_BIN=("${PATCH_PYTHON}")
+elif [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
   PYTHON_BIN=("${VIRTUAL_ENV}/bin/python")
 elif [[ -x ".venv/bin/python" ]]; then
   PYTHON_BIN=(".venv/bin/python")
