@@ -7,8 +7,10 @@
 ## 0. 一句话现状
 
 - ✅ **Polar 端到端 rollout smoke test 在 B300 上跑通**（reward 1.0，calculator example, claude_code harness, SGLang docker image）。
-- ✅ **Slime cu130 docker image build 完成** (`slimerl/slime-cu130:local`, 73GB)，全栈在 B300 上可 import（torch 2.11 cu129 + sgl_kernel 0.4.2.post2+cu130 + Slime + Megatron + TransformerEngine + patched Triton）。需要 `LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:...`。
-- 🚧 **下一步：进容器跑 swegym_slime_grpo example 端到端训练（convert weights + run.sh）**。
+- ✅ **Slime cu130 docker image build 完成** (`slimerl/slime-cu130:local`, 73GB)，全栈在 B300 上可 import。
+- ✅ **权重转换成功**（Qwen3.5-4B HF → Megatron torch_dist, 7.9G, 在容器内一次过）。
+- ✅ **Slime+Polar 端到端训练管线在 B300 上跑起来了**（拆分编排：host 跑 Polar+apptainer，容器跑 Ray+Slime+SGLang，`--network host` 互通）。已验证：SGLang 2 引擎 ready、Megatron 加载、Polar gateway proxy、apptainer SWE-Gym sandbox 起来、agent 真的在解题（SGLang decode 300-500 tok/s、gateway `/v1/chat/completions` 200 OK）。
+- 🚧 **唯一剩余 blocker：训练侧拿不到 token_ids → "zero trainable tokens"**。容器 SGLang 没打 token-id-emission patch（Slime 的 sglang.patch 不兼容 0.5.12 已跳过；Polar 的 patch_sglang.sh 还没适配到 0.5.12）。这是 [[skyrl_harbor_legacy_inference]] 同一类问题（inference engine 不吐 token_ids，trainer 无法构 sample）。
 
 ## 1. 工作目录与仓库
 
@@ -271,3 +273,72 @@ bash examples/swegym_slime_grpo/run.sh
 - 我们这台另一个 user 在用 GPU 4,5,6,7（DeepSeek-V4-Pro 等），别动他们的进程；GPU 0,1,2,3 是我们的
 - 重启 SGLang docker 后 `_force_delete_via_rest` 不存在（那是 SkyRL/harbor 的 owner-reaper，不适用 Polar 这套）
 - Slime 训练日志默认在 wandb；本地日志 `./logs/`
+
+## 7. 端到端训练编排（拆分方案，已跑通管线）
+
+容器缺 polar/apptainer/slime_bridge，host 缺干净的 slime 栈。所以拆分：
+
+| 角色 | 跑在哪 | 起什么 |
+|---|---|---|
+| Polar rollout + gateway | **host** (.venv) | `examples/swegym_slime_grpo/run_host_polar.sh` |
+| apptainer SWE-Gym sandbox | **host** (gateway 调起) | — |
+| Ray + Slime train + SGLang engines | **容器** (`--network host`, GPU 0-3) | `examples/swegym_slime_grpo/run_container_slime.sh` |
+
+`--network host` 让两边 127.0.0.1 / host-IP 共享网络：
+- 容器 SGLang router 绑 host-IP:19000 ← gateway 必须用 host-IP（不是 127.0.0.1）连它，run_host_polar.sh 自动探测 host IP 写进 topology。
+- slime_bridge(容器) → host Polar rollout :18080；gateway → 容器 SGLang :19000。
+
+### 复现（权重已转好的前提下）
+
+```bash
+# 1. host 起 polar（后台）
+cd /scratch/yuzhou/projects/ProRL-Agent-Server
+mkdir -p tmp/swegym_slime_grpo
+set -a; source /scratch/yuzhou/projects/RL/research/pgc_swe/.env; set +a   # E2B/HF keys
+bash examples/swegym_slime_grpo/run_host_polar.sh > tmp/swegym_slime_grpo/host_polar.log 2>&1 &
+# 等 health: curl -sf http://127.0.0.1:18080/health
+
+# 2. 容器起训练（3-instance smoke 子集）
+docker run -d --name slime-train \
+  --gpus '"device=0,1,2,3"' --shm-size 32g --ipc=host --network host \
+  -v /scratch/yuzhou/projects/ProRL-Agent-Server:/workspace/ProRL-Agent-Server \
+  -v /scratch/yuzhou/.cache/huggingface:/root/.cache/huggingface \
+  -e HF_TOKEN=$HF_TOKEN \
+  slimerl/slime-cu130:local \
+  bash -lc "cd /workspace/ProRL-Agent-Server && \
+    PROMPT_DATA=/workspace/ProRL-Agent-Server/examples/swegym_slime_grpo/swegym_train_smoke3.jsonl \
+    ROLLOUT_BATCH_SIZE=2 N_SAMPLES_PER_PROMPT=4 SAVE_INTERVAL=5 \
+    bash examples/swegym_slime_grpo/run_container_slime.sh"
+docker logs -f slime-train
+```
+
+端口（本机 8080/9000/6379 被另一 user 占）：Polar rollout 18080 / gateway 18100 / SGLang router 19000 / Ray GCS 6380 / Ray dashboard 8266。换机器可改回默认。
+
+### 踩过的坑（已在脚本里修好）
+
+1. **Ray GCS 6379 冲突**（`--network host` + 别人占了 6379）→ `RAY_GCS_PORT=6380 RAY_DASHBOARD_PORT=8266`（run_container_slime.sh 已参数化）。
+2. **gateway 502 Bad Gateway / All connection attempts failed**：Slime SGLang router 绑 host-IP（get_host_info），gateway 用 127.0.0.1 连不上 → run_host_polar.sh 自动探测 host IP 写进 topology sglang.base_url。
+3. **prompt-data 全 293 条但只 build 了 3 个 SIF** → `swegym_train_smoke3.jsonl`（3 instance 子集）。
+
+## 8. ⛔ 剩余 blocker：SGLang token-id patch 适配 0.5.12.post1
+
+现象：`Dropping Polar group N because of zero trainable tokens`。slime_bridge/adapter.py 因 trace 缺 prompt/response token_ids 把所有 sample drop（loss_mask 全 0）。根因：容器 SGLang 不吐 token_ids。
+
+修复：把 Polar 的 `scripts/patch/patch_sglang.sh`（写给 0.5.10）适配到容器的 sglang 0.5.12.post1。已做了一半，存为 **`scripts/patch/patch_sglang_0512.sh`**：
+
+| patch 目标文件 | 0.5.12.post1 适配状态 |
+|---|---|
+| `srt/entrypoints/openai/protocol.py`（schema: token_id/input_token_ids 字段） | ✅ 原样匹配 |
+| `srt/entrypoints/openai/utils.py`（append token_id） | ✅ 原样匹配 |
+| `srt/managers/tokenizer_manager.py` | ✅ 已改：snippet3 `total_retractions` → `num_retractions` |
+| `serving_chat.py` 非流式 `ChatCompletionResponseChoice(...)` | ✅ 原样匹配 |
+| `serving_chat.py` `ChatCompletionTokenLogprob` token_logprobs loop | ✅ 原样匹配 |
+| `serving_chat.py` **streaming snippets**（_process_tool_call_stream 签名/调用、streaming choice_data、normal_text/tool_calls choice_data） | ⛔ **未适配** — 0.5.12 重构了这段（+591 行），snippet 对不上 |
+
+### 两条往下走的路（二选一）
+
+**路 A — port streaming snippets**：进容器 `sed -n` 看 `serving_chat.py` 的 streaming 段（`_process_tool_call_stream` 定义 + 各 `ChatCompletionResponseStreamChoice(` 构造点），把 patch_sglang_0512.sh 里对应 5 个 `replace_once` 的 `old` 块改成 0.5.12 的实际文本。改完 `docker run --rm -v .../patch_sglang_0512.sh:... slimerl/slime-cu130:local bash -lc 'bash /tmp/patch.sh'` 应打印 `Patched SGLang in ...`。然后把 patch bake 进镜像（docker/slime-cu130/Dockerfile 加一层 `RUN bash patch_sglang_0512.sh`）或容器启动时先跑。
+
+**路 B — 最小 patch + 非流式 harness**（更省事）：非流式路径 5 个 snippet 已全部匹配。做一个只含 protocol+utils+tokenizer_manager+非流式choice+token_logprobs-loop 的精简 patch（去掉所有 streaming `replace_once`），然后把 `polar_config.yaml` 的 `agent.harness` 从 `qwen_code`（require_streaming=true）换成 **非流式 harness**（`openhands_sdk` 或 `pi`，require_streaming=false）。这样 gateway 走非流式响应，已 patch 的非流式代码就能吐 token_ids。代价：换了 agent harness（实验设定变化）。
+
+适配/验证 patch 后，重跑第 7 节的复现命令，预期不再 `zero trainable tokens`，能看到 `grad_norm` / GRPO step。
