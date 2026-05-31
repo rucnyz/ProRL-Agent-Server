@@ -16,7 +16,11 @@
 - 🔧 **闭环路上修掉的两个 B300 专属坑**（都固化进脚本，见 §11）：
   1. **libcudart 冲突**：train actor 为 weight-sync `import sglang` 时，若 cu13 在其 `LD_LIBRARY_PATH` 上会把 `libcudart.so.13` 拉进进程，与 torch 的 `.so.12` 冲突，TE fused_attn 报 `Multiple libcudart libraries found`。解法：用 slime 自带 `--train-env-vars '{"LD_LIBRARY_PATH": "<不含 cu13>"}'` 给 train actor 单独设 cu13-free LD（Ray 实测完全覆盖、不 prepend）；SGLang 引擎仍走 job 级含 cu13 的 LD（它需要 sgl_kernel cu130）。
   2. **head_dim=256 无 attention 后端**：B300=sm103，TE 2.10 把 flash-attn head_dim>192 的白名单写死成 `(8,0)(9,0)(10,0)(12,0)`（漏了 sm103），cuDNN 9.16 fused 不支持 head_dim256，THD packing 又禁用 unfused → `No dot product attention backend is available`。解法：`scripts/patch/patch_te_sm103.sh` 给白名单加 `(10,3)`，flash-attn 2.7.4 的 kernel 实测能在 sm103+head_dim256+thd 上正确跑（sm103/B300 与 sm100/B200 同属 Blackwell，kernel 通用）。**注意：全 cu13 并不能解决这个 attention 问题（已验证），它和 cu12/cu13 正交。**
-- 🚧 **下一步**：切 `claude_code` harness（流式）。需把 token-id emission 的流式分支 port 进 sglang patch（`patch_sglang_min.sh` 目前只覆盖非流式，配 `pi`）。详见 §8 路 A。
+- ✅✅ **claude_code harness 端到端跑通**：切 `HARNESS=claude_code MODEL_NAME=Qwen/Qwen3.5-4B` 即可，**不需要 port 流式 patch**——Polar gateway（`server.py:_handle_streaming`）对 SGLang **永远发非流式请求**，再把响应合成 SSE 流回给 agent，所以现有非流式 token-id patch 已覆盖 claude_code。gateway（`node.py:_runtime_env`）自动注入 `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`。已验证：claude_code 经 anthropic→openai transform 用 Qwen 解 getmoto/moto，`resolved_rate` 高到 1.0，rollout 数据驱动了 `Timer train start`（整条链路 claude_code→gateway→SGLang→swegym→reward→advantage→Megatron 全通）。
+- 🔧 **claude_code 两个调参坑**（见 §11 / `common_env.sh`）：
+  1. **context 溢出 400 → 熔断**：claude_code 默认请求 `max_tokens=32000`，加上大 system+tools prompt 超 `--sglang-context-length`，每个请求 400，触发 sgl-router 熔断 → 全 rollout 503 停摆。解法：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`(=`ROLLOUT_MAX_RESPONSE_LEN`，经 agent.env 注入) 压低输出预算 + `SGLANG_CONTEXT_LENGTH=98304` 容纳长 agentic prompt（claude_code prompt 会涨到 50k+）。所有长度旋钮集中在 `common_env.sh` 单一真相来源。
+  2. **zero-variance GRPO**：claude_code 太强,在 3-instance smoke(getmoto/moto)上每次都解出(reward 全 1.0) → `reward_std=0` → advantage 全 0 → 组不被接受、无有效梯度。这是数据太简单,非 bug（pi 因解不好反而有方差,出了 grad_norm 2.94）。**有意义的 claude_code 训练需用有难度梯度的数据集**（如完整 293-instance，claude_code 成功率 <100% → 有方差）。单引擎下 claude_code 会话慢（~2-12min/session），凑 batch 慢。
+- 🚧 **下一步**：用完整 293-instance 数据集跑 claude_code 正经训练（有 reward 方差 → 非零 advantage → 真 grad_norm）。可选：解决 2-引擎 weight-sync 以加速 rollout。
 
 ## 1. 工作目录与仓库
 

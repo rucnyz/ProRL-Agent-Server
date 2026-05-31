@@ -43,6 +43,19 @@ HARNESS="${HARNESS:-pi}"
 # openai/Qwen/Qwen3.5-4B → provider=openai, model_id=Qwen/Qwen3.5-4B. The
 # default qwen_code harness wants a bare name (gpt-5.4), hence the override.
 MODEL_NAME="${MODEL_NAME:-openai/Qwen/Qwen3.5-4B}"
+# claude_code defaults to requesting max_tokens=32000 for the completion. With its
+# large system prompt + tool definitions (~22k input) that overshoots the SGLang
+# context window and every request 400s ("Requested token count exceeds the
+# model's maximum context length"); the 400s trip the sgl-router circuit breaker
+# and the whole rollout stalls on 503s. Cap claude_code's output budget (matches
+# --rollout-max-response-len) and run SGLang with a larger context (see
+# SGLANG_CONTEXT_LENGTH in run_container_slime.sh) so prompt+completion fits.
+# Injected into the agent's exec env (claude_code reads CLAUDE_CODE_MAX_OUTPUT_TOKENS);
+# harmless for non-claude harnesses. Uses the shared ROLLOUT_MAX_RESPONSE_LEN
+# (common_env.sh) that run_container_slime.sh also feeds to --rollout-max-response-len,
+# so a single knob governs both the agent's output budget and slime's trained cap.
+source "${SCRIPT_DIR}/common_env.sh"
+CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-${ROLLOUT_MAX_RESPONSE_LEN}}"
 AGENT_CLI_DIR="${AGENT_CLI_DIR:-${PROJECT_ROOT}/tmp/swegym_agent_cli/opt_node}"
 APPTAINER_IMAGE_DIR="${APPTAINER_IMAGE_DIR:-${PROJECT_ROOT}/tmp/swegym_apptainer_images}"
 export POLAR_APPTAINER_BIN="${POLAR_APPTAINER_BIN:-/usr/bin/apptainer}"
@@ -56,13 +69,15 @@ CUSTOM_CONFIG_PATH="${RUN_DIR}/polar_config.yaml"
   "${SCRIPT_DIR}/topology.yaml" "${TOPOLOGY_PATH}" "${SGLANG_ROUTER_BASE_URL}" \
   "${SCRIPT_DIR}/polar_config.yaml" "${CUSTOM_CONFIG_PATH}" \
   "${AGENT_CLI_DIR}" "${APPTAINER_IMAGE_DIR}" \
-  "${ROLLOUT_PORT}" "${GATEWAY_PORT}" "${HARNESS}" "${MODEL_NAME}" <<'PY'
+  "${ROLLOUT_PORT}" "${GATEWAY_PORT}" "${HARNESS}" "${MODEL_NAME}" \
+  "${CLAUDE_CODE_MAX_OUTPUT_TOKENS}" <<'PY'
 from pathlib import Path
 import sys
 import yaml
 
 (topo_in, topo_out, router_url, polar_in, polar_out,
- agent_cli_dir, image_dir, rollout_port, gateway_port, harness, model_name) = sys.argv[1:]
+ agent_cli_dir, image_dir, rollout_port, gateway_port, harness, model_name,
+ claude_max_out) = sys.argv[1:]
 rollout_port, gateway_port = int(rollout_port), int(gateway_port)
 
 topo = yaml.safe_load(open(topo_in)) or {}
@@ -85,6 +100,8 @@ pc["polar_apptainer_image_dir"] = image_dir
 _agent = pc.setdefault("polar_task_template", {}).setdefault("agent", {})
 _agent["harness"] = harness
 _agent["model_name"] = model_name
+if claude_max_out:
+    _agent.setdefault("env", {})["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(claude_max_out)
 yaml.safe_dump(pc, open(polar_out, "w"), sort_keys=False)
 print(f"rendered {topo_out} (rollout :{rollout_port}, gateway :{gateway_port}, sglang {router_url})")
 print(f"rendered {polar_out}")

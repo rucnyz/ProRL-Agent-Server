@@ -37,9 +37,13 @@ RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8266}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-4}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-60000}"
-SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-50000}"
+# Sequence-length knobs (ROLLOUT_MAX_RESPONSE_LEN / ROLLOUT_MAX_PROMPT_LEN /
+# SGLANG_CONTEXT_LENGTH) come from the shared common_env.sh so the host agent's
+# output budget and these training/inference caps stay in sync — one source of truth.
+source "${SCRIPT_DIR}/common_env.sh"
 SGLANG_ROUTER_PORT="${SGLANG_ROUTER_PORT:-19000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
+NUM_EPOCH="${NUM_EPOCH:-1}"
 
 if [ -f "${SAVE_DIR}/latest_checkpointed_iteration.txt" ]; then
     LOAD_DIR="${SAVE_DIR}"
@@ -138,10 +142,10 @@ ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
     --data-source-path slime_bridge.data_source.CeilEpochRolloutDataSourceWithBuffer \
     --prompt-data "${PROMPT_DATA}" \
     --input-key prompt --label-key label --metadata-key metadata \
-    --rollout-shuffle --reward-key score --num-epoch 1 \
+    --rollout-shuffle --reward-key score --num-epoch "${NUM_EPOCH}" \
     --rollout-batch-size "${ROLLOUT_BATCH_SIZE}" \
     --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}" \
-    --rollout-max-response-len 16000 --rollout-max-prompt-len 32000 \
+    --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}" --rollout-max-prompt-len "${ROLLOUT_MAX_PROMPT_LEN}" \
     --dynamic-history --num-steps-per-rollout 1 \
     --tensor-model-parallel-size 2 --sequence-parallel \
     --pipeline-model-parallel-size 1 --context-parallel-size 1 \
