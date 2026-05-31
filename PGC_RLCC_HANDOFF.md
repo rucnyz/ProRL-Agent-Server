@@ -10,7 +10,8 @@
 - ✅ **Slime cu130 docker image build 完成** (`slimerl/slime-cu130:local`, 73GB)，全栈在 B300 上可 import。
 - ✅ **权重转换成功**（Qwen3.5-4B HF → Megatron torch_dist, 7.9G, 在容器内一次过）。
 - ✅ **Slime+Polar 端到端训练管线在 B300 上跑起来了**（拆分编排：host 跑 Polar+apptainer，容器跑 Ray+Slime+SGLang，`--network host` 互通）。已验证：SGLang 2 引擎 ready、Megatron 加载、Polar gateway proxy、apptainer SWE-Gym sandbox 起来、agent 真的在解题（SGLang decode 300-500 tok/s、gateway `/v1/chat/completions` 200 OK）。
-- 🚧 **唯一剩余 blocker：训练侧拿不到 token_ids → "zero trainable tokens"**。容器 SGLang 没打 token-id-emission patch（Slime 的 sglang.patch 不兼容 0.5.12 已跳过；Polar 的 patch_sglang.sh 还没适配到 0.5.12）。这是 [[skyrl_harbor_legacy_inference]] 同一类问题（inference engine 不吐 token_ids，trainer 无法构 sample）。
+- ✅ **token-id blocker 已解决**：精简非流式 patch (`scripts/patch/patch_sglang_min.sh`) + `pi` 非流式 harness → `zero trainable tokens` 不再出现（整 run 0 次）。rollout/reward/advantage 链路全通，Megatron 加载 ckpt、pi agent 在 SWE-Gym sandbox 解题、SGLang decode 正常。
+- 🚧 **当前 blocker：weight-sync NCCL hang**。首个 GRPO step 的 weight update（Megatron→SGLang，NCCL custom process group `world_size=3` = 1 train + 2 engines）卡死：只有 1 个 engine 调了 `init_weights_update_group`（应 2 个），第二个引擎从不加入 → NCCL broadcast 永久阻塞，GPU 0%。详见 §9。
 
 ## 1. 工作目录与仓库
 
@@ -342,3 +343,44 @@ docker logs -f slime-train
 **路 B — 最小 patch + 非流式 harness**（更省事）：非流式路径 5 个 snippet 已全部匹配。做一个只含 protocol+utils+tokenizer_manager+非流式choice+token_logprobs-loop 的精简 patch（去掉所有 streaming `replace_once`），然后把 `polar_config.yaml` 的 `agent.harness` 从 `qwen_code`（require_streaming=true）换成 **非流式 harness**（`openhands_sdk` 或 `pi`，require_streaming=false）。这样 gateway 走非流式响应，已 patch 的非流式代码就能吐 token_ids。代价：换了 agent harness（实验设定变化）。
 
 适配/验证 patch 后，重跑第 7 节的复现命令，预期不再 `zero trainable tokens`，能看到 `grad_norm` / GRPO step。
+
+## 9. ⛔ 当前 blocker：weight-sync NCCL hang（2-engine 配置）
+
+### 现象
+patch + pi harness 重跑后，前半全通：
+- `zero trainable tokens` = **0 次**（token-id patch 生效）
+- Megatron 加载 ckpt（iter 0, TP=2）、pi agent 在 sandbox 解题、SGLang decode 正常、gateway 200 OK
+- 卡在首个 GRPO step 的 **weight update**（Megatron→SGLang 同步新权重）
+
+日志关键：
+```
+(MegatronTrainRayActor) Timer update_weights start
+(SGLangEngine pid=18323) init custom process group: ... rank=1, world_size=3, group_name=slime-pp_0, backend=nccl
+(SGLangEngine pid=18323) POST /init_weights_update_group HTTP/1.1 200 OK
+(SGLangEngine pid=18323) POST /pause_generation 200 OK
+```
+然后 25min+ 无进展，GPU 全 0%。`init_weights_update_group` 只被调用 **1 次**（期望 2，每 engine 一次）。engine 18322 还活着但从没 init group → `world_size=3` 的 NCCL group 永远等不齐 → broadcast 阻塞。
+
+### 怀疑根因
+slime 的 weight-update group 构造假设跟我们的 rollout 配置（`--rollout-num-gpus 2 --rollout-num-gpus-per-engine 1` = 2 个独立 TP=1 引擎）对不上。weight update group 应该把 train rank 0 + **所有** rollout engine 拉进同一个 `world_size = 1 + n_engines` 的 NCCL group，但只有一个 engine 收到 init 调用。
+
+### 往下排查的方向（下次从这开始）
+1. **先试单引擎**：`ROLLOUT_NUM_GPUS=1`（1 个 SGLang 引擎，world_size=2）。如果单引擎能过 weight sync → 确认是多引擎 group 编排问题，且单引擎可作为 smoke 的可行配置（GPU: 2 train + 1 rollout + 1 空）。**这是最快验证端到端训练能不能闭环的路。**
+2. 若要 2 引擎：读 slime `slime/backends/sglang_utils` + `ray/` 里 weight update group 的构造（`init_weights_update_group` 是怎么 fan-out 给 engine 的），看是不是 `--network host` 下 engine 发现/编址有问题，或某个 `--sglang-*` flag 控制 group 成员。
+3. NCCL 接口：`--network host` 下机器有多张网卡（bond0/ens*），可能需要 `NCCL_SOCKET_IFNAME=` 指定。但当前现象是「group 没建齐」而非「建了连不上」，所以先查 #1/#2。
+
+### 复现到这一步
+第 7 节命令照跑（patch + pi 都已固化）。weight sync hang 在首个 step（rollout 完成后）。
+
+## 10. 进度全景（时间线）
+
+| 阶段 | 状态 |
+|---|---|
+| Polar rollout smoke (claude_code, reward 1.0) | ✅ |
+| Slime cu130 docker image (B300) | ✅ |
+| 权重转换 HF→Megatron | ✅ |
+| host/container 拆分编排 | ✅ |
+| 端到端管线启动（引擎/Megatron/gateway/apptainer/agent 全活） | ✅ |
+| token-id patch（非流式）+ pi harness → trainable tokens | ✅ |
+| **weight-sync NCCL (2-engine)** | ⛔ §9 |
+| 首个 GRPO grad_norm | ⏳ 待 weight-sync 解决 |
