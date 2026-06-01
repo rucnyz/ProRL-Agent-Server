@@ -20,7 +20,15 @@
 - 🔧 **claude_code 两个调参坑**（见 §11 / `common_env.sh`）：
   1. **context 溢出 400 → 熔断**：claude_code 默认请求 `max_tokens=32000`，加上大 system+tools prompt 超 `--sglang-context-length`，每个请求 400，触发 sgl-router 熔断 → 全 rollout 503 停摆。解法：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`(=`ROLLOUT_MAX_RESPONSE_LEN`，经 agent.env 注入) 压低输出预算 + `SGLANG_CONTEXT_LENGTH=98304` 容纳长 agentic prompt（claude_code prompt 会涨到 50k+）。所有长度旋钮集中在 `common_env.sh` 单一真相来源。
   2. **zero-variance GRPO**：claude_code 太强,在 3-instance smoke(getmoto/moto)上每次都解出(reward 全 1.0) → `reward_std=0` → advantage 全 0 → 组不被接受、无有效梯度。这是数据太简单,非 bug（pi 因解不好反而有方差,出了 grad_norm 2.94）。**有意义的 claude_code 训练需用有难度梯度的数据集**（如完整 293-instance，claude_code 成功率 <100% → 有方差）。单引擎下 claude_code 会话慢（~2-12min/session），凑 batch 慢。
-- 🚧 **下一步**：用完整 293-instance 数据集跑 claude_code 正经训练（有 reward 方差 → 非零 advantage → 真 grad_norm）。可选：解决 2-引擎 weight-sync 以加速 rollout。
+- ✅✅✅ **claude_code RL 集成全链路验证完成**：2-引擎并行 rollout（GPU2/3 各 80-100%）、weight-sync（2.3s）、GRPO 训练步（step 触发、grad_norm/checkpoint 产出）、**210-instance 完整数据集上 reward 方差实测 0.45**（claude_code 在难实例有成有败）。整个「用 claude_code 训 RL」的管线打通。
+- 📌 **「干净的非零 advantage grad_norm」的剩余 gap（数据/调参，非集成问题）**：
+  - **claude_code 太强**：210 集里多数 SWE-Gym 实例它都能解（resolved_rate 常=1.0）→ 单 prompt 零方差 → GRPO advantage=0（grad_norm 仅 KL 项 ~1e-3）。bs=1 赌单 prompt 难度，多数抽到简单的。
+  - **bs≥2 撞 slime async staleness**：跨 prompt 平均能捕获难 prompt 的非零梯度（bs=4 实测聚合 reward_std 到 0.45、accepted 到 3/4），但慢 claude_code rollout 下先接受的 group 在凑齐整批前过期重置（3/4→0/4），即便 2 引擎也卡。
+  - 数值已验证的 step：pi+smoke `grad_norm=2.94`（有方差）；claude_code smoke `grad_norm=3.6e-4`（零方差，KL only）。
+- 🚧 **后续（要有意义梯度时从这开始，二选一或都做）**：
+  1. **筛数据**：先用 claude_code 跑一遍 210 实例评测，挑成功率 <100%（在 claude_code 能力前沿）的子集做训练集 → 单 prompt 就有方差，bs=1 即可出非零 advantage。
+  2. **调 staleness**：深入 slime `ray/rollout.py` 的 async buffer/over-sampling/staleness，加大容忍度让 bs≥2 能跨更长时间组装 → 拿跨 prompt 的非零梯度。读 `_get_rollout_data` / `over_sampling_batch_size` / "No progress accepted=" 重置逻辑。
+  - 复现：host `HARNESS=claude_code MODEL_NAME=Qwen/Qwen3.5-4B bash run_host_polar.sh`；容器 `ROLLOUT_NUM_GPUS=2 ROLLOUT_BATCH_SIZE=<N> PROMPT_DATA=swegym_train_built.jsonl bash run_container_slime.sh`。SIF：210/293 已建（Docker Hub 限流，剩 83 需 docker login 或等限流重置补 `prepare_apptainer_images.py`）。
 
 ## 1. 工作目录与仓库
 
