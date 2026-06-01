@@ -51,11 +51,17 @@ else
     LOAD_DIR="${REF_LOAD}"
 fi
 
+# Qwen3.5 dims: 4B = hidden 2560 / ffn 9216 (default); 9B = hidden 4096 / ffn 12288.
+# Everything else (32 layers, 16 heads, kv 4, head_dim/kv-channels 256, vocab,
+# rope, 24 linear + 8 full attention via the qwen3_5 spec) is identical across
+# 4B/9B, so a 9B run only overrides HIDDEN_SIZE/FFN_HIDDEN_SIZE + HF_CHECKPOINT/REF_LOAD.
+HIDDEN_SIZE="${HIDDEN_SIZE:-2560}"
+FFN_HIDDEN_SIZE="${FFN_HIDDEN_SIZE:-9216}"
 MODEL_ARGS=(
     --spec "slime_plugins.models.qwen3_5" "get_qwen3_5_spec"
     --disable-bias-linear --qk-layernorm --group-query-attention
     --num-attention-heads 16 --num-query-groups 4 --kv-channels 256
-    --num-layers 32 --hidden-size 2560 --ffn-hidden-size 9216
+    --num-layers 32 --hidden-size "${HIDDEN_SIZE}" --ffn-hidden-size "${FFN_HIDDEN_SIZE}"
     --use-gated-attention --normalization RMSNorm --apply-layernorm-1p
     --position-embedding-type rope --norm-epsilon 1e-6 --rotary-percent 0.25
     --swiglu --vocab-size 248320 --rotary-base 10000000 --attention-output-gate
