@@ -20,4 +20,9 @@
 #                             comfortably; B300 (288GB) has ample KV headroom.
 : "${ROLLOUT_MAX_RESPONSE_LEN:=16000}"
 : "${ROLLOUT_MAX_PROMPT_LEN:=32000}"
-: "${SGLANG_CONTEXT_LENGTH:=98304}"
+# Qwen3.5-4B is natively 262144 (256K) and the SGLang KV pool already holds ~3.5M
+# tokens, so use the full 256K — agentic sessions (esp. harbor terminal tasks) grow
+# past 90k and a smaller cap 400s them. NOTE: run_container_slime.sh always sources
+# THIS file (SCRIPT_DIR is hardcoded to swegym_slime_grpo), so this value governs the
+# container's --sglang-context-length for harbor runs too.
+: "${SGLANG_CONTEXT_LENGTH:=262144}"
