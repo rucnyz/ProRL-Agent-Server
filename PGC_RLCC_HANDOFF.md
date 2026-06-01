@@ -30,6 +30,18 @@
   2. **调 staleness**：深入 slime `ray/rollout.py` 的 async buffer/over-sampling/staleness，加大容忍度让 bs≥2 能跨更长时间组装 → 拿跨 prompt 的非零梯度。读 `_get_rollout_data` / `over_sampling_batch_size` / "No progress accepted=" 重置逻辑。
   - 复现：host `HARNESS=claude_code MODEL_NAME=Qwen/Qwen3.5-4B bash run_host_polar.sh`；容器 `ROLLOUT_NUM_GPUS=2 ROLLOUT_BATCH_SIZE=<N> PROMPT_DATA=swegym_train_built.jsonl bash run_container_slime.sh`。SIF：210/293 已建（Docker Hub 限流，剩 83 需 docker login 或等限流重置补 `prepare_apptainer_images.py`）。
 
+## 0b. Harbor NVIDIA 任务接入 Polar（2026-06-01）
+
+把 NVIDIA Harbor 的 ~6000 个 terminal 任务（6 skill）接进 **Polar+Slime** 栈，用 Polar 自己的 agent（claude_code/pi）解、新 `harbor_verifier` evaluator 评分 —— **不需要 nemo-gym/Terminus runner**。
+
+- ✅ **harbor_verifier evaluator**（`src/polar/trajectory/evaluator/harbor_verifier.py`，已注册）：在 **agent 同一 runtime** 跑任务的 `tests/test.sh`（`refresh_runtime: false`），读 Harbor 的 `/logs/verifier/reward.txt`（binary 1/0）。
+- ✅ **数据适配** `examples/harbor_slime_grpo/make_harbor_dataset.py`：Harbor task 目录 → Polar jsonl（prompt=instruction.md，metadata.{harbor_task_dir, harbor_sif, skill}）。生成 `harbor_smoke48.jsonl`(48) + `harbor_train.jsonl`(5984)。jsonl 含绝对路径已 gitignore，用脚本重生成。
+- ✅ **task template** `examples/harbor_slime_grpo/polar_config.yaml`：bind-mount task 目录到 `/harbor_task:ro`；prepare 把 `environment/files` 覆盖到 `/app`（apptainer host-backed overlay 让 `/app` 可写）；image 用 per-skill 共享 SIF（`metadata.harbor_sif`，6 个已 build 在 `/scratch/yuzhou/.cache/harbor-sif/`）。
+- ✅ **验证**：单机（SIF+overlay+prepare+test.sh→reward.txt 全通）+ 真实 Polar（claude_code 解 harbor 任务、session 完成、harbor_verifier 出 reward、session_result callback 200）。
+- 🔧 **坑**：① `pi` 在 terminal 任务上失控循环到 90k+ token 撞 context → 用 **claude_code**；② 重启容器**必须同时重启 host polar**，否则 session_result callback stale → ConnectError；③ claude_code 个别难任务也会到 98304 context。
+- 🚧 剩余：GRPO step 受 agentic rollout 慢 + batch 组装制约（同 swegym）；harbor 任务多样难度高 → reward 方差应更好。
+- **跑法**：host `HARNESS=claude_code MODEL_NAME=Qwen/Qwen3.5-4B bash examples/harbor_slime_grpo/run_host_polar.sh`；容器 `RUN_DIR=.../tmp/harbor_slime_grpo PROMPT_DATA=.../harbor_smoke48.jsonl ROLLOUT_NUM_GPUS=2 ROLLOUT_BATCH_SIZE=2 bash examples/swegym_slime_grpo/run_container_slime.sh`。
+
 ## 1. 工作目录与仓库
 
 | 路径 | 内容 |
