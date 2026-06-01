@@ -16,8 +16,10 @@
 #                             routinely grows past 50k tokens over a SWE session; a
 #                             request whose prompt+completion overflows this window
 #                             400s and (in bursts) trips the sgl-router circuit
-#                             breaker. 96k holds prompt≈80k + ROLLOUT_MAX_RESPONSE_LEN
-#                             comfortably; B300 (288GB) has ample KV headroom.
+#                             breaker. Qwen3.5-4B supports 262144 (256K) natively and
+#                             the KV pool already holds ~3.5M tokens, so use the full
+#                             256K — agentic harbor sessions can grow past 90k and a
+#                             smaller cap (we earlier used 98304) makes them 400.
 : "${ROLLOUT_MAX_RESPONSE_LEN:=16000}"
 : "${ROLLOUT_MAX_PROMPT_LEN:=32000}"
-: "${SGLANG_CONTEXT_LENGTH:=98304}"
+: "${SGLANG_CONTEXT_LENGTH:=262144}"
