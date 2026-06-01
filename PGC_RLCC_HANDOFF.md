@@ -42,6 +42,15 @@
 - 🚧 剩余：GRPO step 受 agentic rollout 慢 + batch 组装制约（同 swegym）；harbor 任务多样难度高 → reward 方差应更好。
 - **跑法**：host `HARNESS=claude_code MODEL_NAME=Qwen/Qwen3.5-4B bash examples/harbor_slime_grpo/run_host_polar.sh`；容器 `RUN_DIR=.../tmp/harbor_slime_grpo PROMPT_DATA=.../harbor_smoke48.jsonl ROLLOUT_NUM_GPUS=2 ROLLOUT_BATCH_SIZE=2 bash examples/swegym_slime_grpo/run_container_slime.sh`。
 
+## 0c. Harbor 实跑发现：4B 解不出 → 零方差（2026-06-01）
+
+harbor 全链路在 Polar 里跑通后实测（claude_code + Qwen3.5-**4B** + 2 引擎 + 256K context）：
+- ✅ session 正常完成（`rollout_success_rate=1.0`）、harbor_verifier 实际产出 reward、callback 200、overflow=0（修了 `SGLANG_CONTEXT_LENGTH` 98304→262144 的自设上限）。
+- ⚠️ **`reward_mean=reward_std=0.0`**：4B 解出 **0 个** NVIDIA Harbor 难 terminal 任务 → 全 reward 0 → 零方差 → GRPO 无梯度 → 组不被 accept（`zero_std/count_0.0`）→ 拿不到有意义 step。
+- ⚠️ **`session_ms/run_mean≈23min`**：claude_code 在难任务上多轮 flail，单 session 极慢；`MAX_TOKENS_PER_GPU=60000` 还会丢 >60k 的长 trace（晚期轮次）。
+- **结论**：这是**模型能力 vs 任务难度错配**，非集成 bug。要有意义的 harbor GRPO 训练需：① 换更强模型（**Qwen3.5-9B**，即 SkyRL 用的；需先 HF→Megatron 转换 + 改 MODEL_ARGS + 更大 `MAX_TOKENS_PER_GPU`），或 ② 先用 claude_code 评测筛出 4B/9B 能部分解出的较易 harbor 子集做训练集。
+- harbor 集成代码本身（evaluator/adapter/config）已验证可复用，换模型/数据即可。
+
 ## 1. 工作目录与仓库
 
 | 路径 | 内容 |
