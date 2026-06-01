@@ -33,6 +33,7 @@ torchrun --nproc_per_node 1 \
     --use-gated-attention --normalization RMSNorm --apply-layernorm-1p \
     --position-embedding-type rope --norm-epsilon 1e-6 --rotary-percent 0.25 \
     --swiglu --vocab-size 248320 --rotary-base 10000000 --attention-output-gate \
+    --untie-embeddings-and-output-weights \
     --hf-checkpoint "$HF_CHECKPOINT" --save "$OUTPUT_DIR" \
     --tensor-model-parallel-size 1 --pipeline-model-parallel-size 1 \
     --context-parallel-size 1 --expert-model-parallel-size 1 --expert-tensor-parallel-size 1 \

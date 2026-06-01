@@ -66,6 +66,12 @@ MODEL_ARGS=(
     --position-embedding-type rope --norm-epsilon 1e-6 --rotary-percent 0.25
     --swiglu --vocab-size 248320 --rotary-base 10000000 --attention-output-gate
 )
+# 4B has tied embeddings (tie_word_embeddings=true → no flag); 9B is UNTIED
+# (tie_word_embeddings=false → must pass --untie-embeddings-and-output-weights,
+# else Megatron's hf_validate_args asserts a mismatch). Set UNTIE_EMBEDDINGS=1 for 9B.
+if [ -n "${UNTIE_EMBEDDINGS:-}" ]; then
+    MODEL_ARGS+=(--untie-embeddings-and-output-weights)
+fi
 
 CUDNN_LIB="/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib"
 CU13_LIB="/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib"
