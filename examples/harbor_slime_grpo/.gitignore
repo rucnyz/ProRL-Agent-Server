@@ -1,0 +1,3 @@
+# Generated datasets carry absolute host paths (harbor_task_dir) + are large;
+# regenerate with make_harbor_dataset.py.
+*.jsonl

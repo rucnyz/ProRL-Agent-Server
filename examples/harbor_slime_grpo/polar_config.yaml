@@ -1,0 +1,69 @@
+# Polar bridge configuration for Slime's --custom-config-path — Harbor tasks.
+# These become attributes on the `args` namespace passed to the rollout function.
+#
+# Differences vs swegym_slime_grpo/polar_config.yaml:
+#   - image is the per-skill Harbor SIF (full path carried in metadata.harbor_sif)
+#   - the task dir is bind-mounted read-only at /harbor_task; prepare overlays its
+#     environment/files into /app (matching the Harbor Dockerfiles' WORKDIR /app;
+#     COPY files/ /app/). Apptainer runs with a host-backed overlay so /app is
+#     writable for the agent + verifier.
+#   - evaluator = harbor_verifier (runs tests/test.sh in the AGENT's runtime →
+#     reward.txt), so refresh_runtime MUST be false.
+
+polar_rollout_url: "http://127.0.0.1:8080"
+polar_gateway_url: "http://127.0.0.1:8100"
+polar_reward_key: "score"
+polar_max_async_level: 2
+polar_request_timeout: 2400
+polar_callback_host: "127.0.0.1"
+polar_min_complete_accept_fraction: 0.5
+polar_allow_weight_update_overlap: false
+polar_weight_update_pause_timeout: 300
+# run_host_polar.sh renders these to absolute host paths before launch.
+polar_agent_cli_dir: "tmp/swegym_agent_cli/opt_node"
+polar_apptainer_image_dir: "tmp/swegym_apptainer_images"
+
+polar_task_template:
+  timeout_seconds: 2400
+  runtime:
+    backend: "apptainer"
+    # Per-skill Harbor SIF (built by research/pgc_swe build_harbor_sif.py);
+    # absolute path carried per-sample in metadata.harbor_sif.
+    image: "{sample.metadata.harbor_sif}"
+    network: "host"
+    workdir: "/app"
+    env:
+      HOME: "/root"
+      PATH: "/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    kwargs:
+      volumes:
+        - "{args.polar_agent_cli_dir}:/opt/node:ro"
+        # The whole task dir (instruction.md, environment/files, tests) read-only.
+        - "{sample.metadata.harbor_task_dir}:/harbor_task:ro"
+    # Overlay this task's files into /app (the SIF baked some other task's files;
+    # clear them first), run its setup.sh if present, make the output dir. The
+    # apptainer host-backed overlay makes /app writable.
+    prepare:
+      - type: exec
+        command: >-
+          rm -rf /app/* /app/.[!.]* 2>/dev/null || true;
+          mkdir -p /app/output /logs/agent /logs/verifier;
+          cp -a /harbor_task/environment/files/. /app/ 2>/dev/null || true;
+          if [ -f /app/setup.sh ]; then (cd /app && bash setup.sh) >/dev/null 2>&1 || true; fi;
+          true
+  agent:
+    harness: "pi"
+    model_name: "openai/Qwen/Qwen3.5-4B"
+  builder:
+    strategy: "prefix_merging"
+  evaluator:
+    strategy: "harbor_verifier"
+    # Grade in the AGENT's runtime (its /app changes are what we score) — do NOT
+    # spin a fresh sandbox.
+    refresh_runtime: false
+    config:
+      task_mount: "/harbor_task"
+      workdir: "/app"
+      test_timeout: 900.0
+
+polar_task_id_template: "polar-harbor-grpo-{rollout_id}-{sample.group_index}"
