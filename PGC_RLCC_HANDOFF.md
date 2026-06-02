@@ -61,6 +61,32 @@ harbor 全链路在 Polar 里跑通后实测（claude_code + Qwen3.5-**4B** + 2 
 - **要在 Polar 拿到有方差的 harbor 训练,需三选一**:① 写 Terminus-2 的 Polar harness(移植 harbor 原生 agent —— 工程量大);② 先评测筛出 claude_code 能部分解的较易 harbor 子集;③ 改 binary→shaped/partial reward(harbor_verifier 读 pytest 通过比例而非全通过)。另外长 harbor 会话需提高 `MAX_TOKENS_PER_GPU`(≥90k)否则合并 trace 被丢成 dummy。
 - harbor 集成本身(evaluator/adapter/config/9B 转换)全部验证可用,换 agent / 数据 / reward 公式即可复用。
 
+## 0f. ✅ 成功:harbor GRPO 非零 pg_loss step(2026-06-02 17:11)
+
+**「彻底把 harbor 的 NVIDIA task 接过来并成功跑上、类似 SkyRL」达成。** Qwen3.5-4B + claude_code + harbor terminal task,完整 GRPO step 带**非零策略梯度**:
+
+```
+step 1: train/pg_loss   = -0.04959962   (非零)
+        train/grad_norm =  0.48279960   (非零)
+        train/advantages = +0.04956747   (非零 GRPO 优势)
+        train/loss = -0.04959946, entropy_loss=0.0944, kl_loss=1.6e-4, tis=0.5
+        global_batch_size = 8, train/step = 1
+        组: reward_mean=0.65, reward_std=0.21667(组内方差), success_rate=0.5
+        actor_train: 1607s / 38 microbatch, 无 OOM
+```
+
+**完整成功链路(逐格点亮)**:
+1. 4B coherent 生成(9B 转换坏 → garbage,见下;4B 正常,shaped reward_mean≈0.65-0.71)。
+2. **组内 reward 方差存在**:bs=1 N=8,shaped reward(pytest 通过比例)→ 某些 prompt 的 8 个样本得分不同(reward_std 实测 0.16/0.32/0.2167)。破解了「claude_code 在同一 task 上结果一致 → 组内零方差」的担忧:N=8 + 扫足够 prompt 后方差组随机出现。
+3. 方差组被 slime dynamic-sampling 接受(零方差组被过滤,这是正确行为)。
+4. **trace 长度**:claude_code harbor 合并 trace 达 90-177K tokens。`MAX_TOKENS_PER_GPU=131072` 留住大部分(drops≈0);98304 会丢光方差组(它们正是最长的前沿任务)。
+5. **显存(关键工程修复)**:Qwen3.5 **vocab=248320 巨大** → 完整 logits 在 **TP=2** 下每卡 ~65GB,actor_train 加梯度 → 268GB OOM(差 122MB,两次)。ref_log_probs(no_grad)能过,actor(需梯度图)过不了。**解法:`TP_SIZE=4`**(脚本 line 162 参数化)沿词表把 logits 切到 4 卡 → 每卡 logits 减半 → 训练卡基线仅 24GB、actor 峰值 240-260GB 稳住不 OOM。保持 MAX_TOKENS=131072(方差组照常 accept)。还给 train actor 显式加了 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments`。
+6. ref_log_probs(811s)→ actor_train(38 microbatch,1607s)→ **非零 pg_loss + grad_norm**。
+
+**复现**:host `HARNESS=claude_code MODEL_NAME=openai/Qwen/Qwen3.5-4B bash examples/harbor_slime_grpo/run_host_polar.sh`;容器 `RUN_DIR=.../tmp/harbor_slime_grpo HF_CHECKPOINT=Qwen/Qwen3.5-4B REF_LOAD=.../Qwen3.5-4B_torch_dist PROMPT_DATA=.../harbor_smoke48.jsonl SGLANG_CONTEXT_LENGTH=262144 MAX_TOKENS_PER_GPU=131072 SGLANG_WATCHDOG_TIMEOUT=3600 TP_SIZE=4 ACTOR_NUM_GPUS_PER_NODE=4 ROLLOUT_NUM_GPUS=4 RAY_NUM_GPUS=8 ROLLOUT_BATCH_SIZE=1 N_SAMPLES_PER_PROMPT=8 bash examples/swegym_slime_grpo/run_container_slime.sh`。方差组随机出现(~45-50min/组),命中即出非零 step。
+
+**9B 现状(独立遗留,不影响上面成功)**:9B 转换/serving 坏 —— SGLang 服务 9B 时输出乱码(连「2+2」都是 gibberish)。config/头配置/mbridge `output_layer←lm_head` 映射纸面全对,是 untie 执行层 bug,留待深修。本次成功用 4B(SkyRL 也证明 9B 能解 harbor,但 4B 已足够演示非零梯度的完整 RL 闭环)。
+
 ## 0e. Harbor 最终状态 + 深层 RL 发现（2026-06-02）
 
 **全部集成 + 机制层面修复均已验证可用并提交**：

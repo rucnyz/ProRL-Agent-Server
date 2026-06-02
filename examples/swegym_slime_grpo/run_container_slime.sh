@@ -100,7 +100,7 @@ RUNTIME_ENV_JSON="{
   }
 }"
 # cu13-free LD override for the train actor only (see TRAIN_LD comment above).
-TRAIN_ENV_VARS_JSON="{\"LD_LIBRARY_PATH\": \"${TRAIN_LD}\"}"
+TRAIN_ENV_VARS_JSON="{\"LD_LIBRARY_PATH\": \"${TRAIN_LD}\", \"PYTORCH_CUDA_ALLOC_CONF\": \"max_split_size_mb:2048,expandable_segments:True\"}"
 
 # Apply the SGLang token-id emission patch (idempotent). Without it the
 # gateway-recorded trajectories carry no token_ids and slime_bridge drops
@@ -159,7 +159,7 @@ ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
     --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}" \
     --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}" --rollout-max-prompt-len "${ROLLOUT_MAX_PROMPT_LEN}" \
     --dynamic-history --num-steps-per-rollout 1 \
-    --tensor-model-parallel-size 2 --sequence-parallel \
+    --tensor-model-parallel-size "${TP_SIZE:-2}" --sequence-parallel \
     --pipeline-model-parallel-size 1 --context-parallel-size 1 \
     --expert-model-parallel-size 1 --expert-tensor-parallel-size 1 \
     --recompute-granularity full --recompute-method uniform --recompute-num-layers 1 \
