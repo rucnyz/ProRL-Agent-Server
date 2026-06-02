@@ -51,6 +51,16 @@ harbor 全链路在 Polar 里跑通后实测（claude_code + Qwen3.5-**4B** + 2 
 - **结论**：这是**模型能力 vs 任务难度错配**，非集成 bug。要有意义的 harbor GRPO 训练需：① 换更强模型（**Qwen3.5-9B**，即 SkyRL 用的；需先 HF→Megatron 转换 + 改 MODEL_ARGS + 更大 `MAX_TOKENS_PER_GPU`），或 ② 先用 claude_code 评测筛出 4B/9B 能部分解出的较易 harbor 子集做训练集。
 - harbor 集成代码本身（evaluator/adapter/config）已验证可复用，换模型/数据即可。
 
+## 0d. Harbor 决定性发现：claude_code+Qwen 解不出 → 零方差（4B 与 9B 均如此）
+
+实测(claude_code + Qwen3.5-**9B**,重转 untie、256K context、镜像重建后):
+- ✅ 全链路健康:9B 不 OOM、2 引擎 ready、context 262144、session `rollout_success_rate=1.0`、harbor_verifier 出 reward、callback 200。
+- ❌ **`reward_mean=reward_std=reward_mean_completed=0.0`** —— 9B 解出 **0 个** harbor smoke 任务(和 4B 一样)。GRPO step 触发但是 **dummy(pg_loss=kl_loss=grad_norm=0)**。
+- ❌ 叠加 trace 长度:`prefix_merging` 把 claude_code 多轮 harbor 会话合并成 ~72k-90k 的单条 trace,被 `MAX_TOKENS_PER_GPU=60000` 整条丢弃 → 无可训 trace → dummy。即便提高 MAX_TOKENS 也救不了零方差。
+- **根因**:SkyRL 训 9B harbor 用的是 **Harbor 原生 Terminus-2 agent**(为 terminal-bench 调过),不是 claude_code。claude_code+Qwen 在这些难 NVIDIA 合成终端任务上要**全部 pytest 通过(binary reward=1)**几乎不可能 → 全 0 → 零方差。这是 **agent 能力 / reward 设计** 问题,非集成 bug。
+- **要在 Polar 拿到有方差的 harbor 训练,需三选一**:① 写 Terminus-2 的 Polar harness(移植 harbor 原生 agent —— 工程量大);② 先评测筛出 claude_code 能部分解的较易 harbor 子集;③ 改 binary→shaped/partial reward(harbor_verifier 读 pytest 通过比例而非全通过)。另外长 harbor 会话需提高 `MAX_TOKENS_PER_GPU`(≥90k)否则合并 trace 被丢成 dummy。
+- harbor 集成本身(evaluator/adapter/config/9B 转换)全部验证可用,换 agent / 数据 / reward 公式即可复用。
+
 ## 1. 工作目录与仓库
 
 | 路径 | 内容 |
