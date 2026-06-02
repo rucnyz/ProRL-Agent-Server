@@ -175,6 +175,7 @@ ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
     --attention-backend auto --no-gradient-accumulation-fusion \
     --sglang-mem-fraction-static 0.8 \
     --sglang-context-length "${SGLANG_CONTEXT_LENGTH}" \
+    --sglang-watchdog-timeout "${SGLANG_WATCHDOG_TIMEOUT:-3600}" \
     --sglang-tool-call-parser qwen3_coder \
     --router-policy "${SGLANG_ROUTER_POLICY:-round_robin}" \
     --sglang-router-port "${SGLANG_ROUTER_PORT}" \
