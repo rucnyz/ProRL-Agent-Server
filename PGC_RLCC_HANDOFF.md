@@ -61,6 +61,22 @@ harbor 全链路在 Polar 里跑通后实测（claude_code + Qwen3.5-**4B** + 2 
 - **要在 Polar 拿到有方差的 harbor 训练,需三选一**:① 写 Terminus-2 的 Polar harness(移植 harbor 原生 agent —— 工程量大);② 先评测筛出 claude_code 能部分解的较易 harbor 子集;③ 改 binary→shaped/partial reward(harbor_verifier 读 pytest 通过比例而非全通过)。另外长 harbor 会话需提高 `MAX_TOKENS_PER_GPU`(≥90k)否则合并 trace 被丢成 dummy。
 - harbor 集成本身(evaluator/adapter/config/9B 转换)全部验证可用,换 agent / 数据 / reward 公式即可复用。
 
+## 0e. Harbor 最终状态 + 深层 RL 发现（2026-06-02）
+
+**全部集成 + 机制层面修复均已验证可用并提交**：
+- harbor_verifier evaluator（binary + **shaped=pytest 通过比例**，读 ctrf.json）、数据适配、polar_config、run 脚本。
+- shaped reward 实测产出**真 reward 方差 `reward_mean=0.71, reward_std=0.26`**（破解 binary 全过=0 的零方差陷阱）。
+- `MAX_TOKENS_PER_GPU=98304` → claude_code 长 harbor 合并 trace（90-100k）0 丢弃（破 dummy）。
+- `--sglang-watchdog-timeout 3600` → 17min 长训练步期间引擎不被 watchdog 杀（破 weight-sync ConnectionRefused 崩溃）。
+- **GRPO step 能完成**（global_batch_size、Timer train end、weight-sync）。9B 转换（untie）+ 重启后镜像重建都完成。
+
+**剩余 gap：非零 pg_loss 的 step（深层 RL 根因,非集成 bug）**：
+- 实测出 step 但 `pg_loss=0`：GRPO 按 **prompt 组内**归一化 advantage,需要**同一 task 的 N 个样本之间有 reward 方差**。
+- claude_code+Qwen 在同一 harbor task 上多次尝试**结果一致**(通过相同测试比例)→ **组内方差≈0** → advantage=0 → pg_loss=0。
+- shaped reward 给的是**跨 prompt 方差**（reward_std=0.26 是不同 task 间）,GRPO 用不上。bs≥2 还撞 slime async staleness 组装不齐。
+- **要拿到非零策略梯度,需**：① 提高 rollout 采样多样性（温度/采样）制造组内方差;② 换更随机/更强的 agent（SkyRL 用 **Terminus-2**,非 claude_code）;③ 或用利用跨 prompt 方差的 advantage 估计（非纯组内 GRPO）。
+- 复现：`HARNESS=claude_code MODEL_NAME=Qwen/Qwen3.5-4B`（host）;容器 `RUN_DIR=tmp/harbor_slime_grpo PROMPT_DATA=harbor_smoke48.jsonl SGLANG_CONTEXT_LENGTH=262144 MAX_TOKENS_PER_GPU=98304 SGLANG_WATCHDOG_TIMEOUT=3600 ROLLOUT_BATCH_SIZE=1 N_SAMPLES_PER_PROMPT=4 bash examples/swegym_slime_grpo/run_container_slime.sh`。
+
 ## 1. 工作目录与仓库
 
 | 路径 | 内容 |
